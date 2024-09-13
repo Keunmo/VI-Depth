@@ -7,6 +7,8 @@ from modules.interpolator import Interpolator2D
 
 import modules.midas.transforms as transforms
 import modules.midas.utils as utils
+from pathlib import Path
+from PIL import Image
 
 class VIDepth(object):
     def __init__(self, depth_predictor, nsamples, sml_model_path, 
@@ -67,11 +69,11 @@ class VIDepth(object):
 
         input_sparse_depth_valid = (input_sparse_depth < self.max_depth) * (input_sparse_depth > self.min_depth)
         if validity_map is not None:
-            input_sparse_depth_valid *= validity_map.astype(np.bool)
+            input_sparse_depth_valid *= validity_map.astype(bool)
 
         input_sparse_depth_valid = input_sparse_depth_valid.astype(bool)
         input_sparse_depth[~input_sparse_depth_valid] = np.inf # set invalid depth
-        input_sparse_depth = 1.0 / input_sparse_depth
+        input_sparse_depth = 1.0 / input_sparse_depth  # look here, we are converting depth to inverse depth
 
         # run depth model
         with torch.no_grad():
@@ -90,8 +92,8 @@ class VIDepth(object):
 
         # global scale and shift alignment
         GlobalAlignment = LeastSquaresEstimator(
-            estimate=depth_pred,
-            target=input_sparse_depth,
+            estimate=depth_pred,  # this is inverse depth by depth estimation model
+            target=input_sparse_depth,  # this is inverse metric sparse depth 
             valid=input_sparse_depth_valid
         )
         GlobalAlignment.compute_scale_and_shift()
@@ -139,3 +141,44 @@ class VIDepth(object):
             "sml_depth" : sml_pred, 
         }
         return output
+
+
+if __name__ == "__main__":
+    method = VIDepth(
+        depth_predictor="dpt_beit_large_512", 
+        nsamples=150, 
+        sml_model_path="weights/sml_model.dpredictor.dpt_beit_large_512.nsamples.150.ckpt", 
+        min_pred=0.1, 
+        max_pred=15.0,
+        min_depth=0.2, 
+        max_depth=8.0, 
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
+    input_prefix = Path("input")
+    output_prefix = Path("output")
+
+    gt_dep_prefix = Path("ground_truth")
+    gt_spdep_prefix = Path("sparse_depth")
+    rgb_prefix = Path("image")
+
+    ga_dep_prefix = Path("ga_depth")
+    sml_dep_prefix = Path("sml_depth")
+
+    scene = "classroom4"
+    imname = "1552695831.4496.png"
+
+    gt_rgb1 = utils.read_image((input_prefix / scene / rgb_prefix / imname).as_posix())
+    gt_dep1 = np.array(Image.open((input_prefix / scene / gt_dep_prefix / imname).as_posix()), dtype=np.float32) / 256.0
+    gt_spdep1 = np.array(Image.open((input_prefix / scene / gt_spdep_prefix / imname).as_posix()), dtype=np.float32) / 256.0
+
+    validity_map = np.array(Image.open((input_prefix / scene / "validity_map" / imname).as_posix()), dtype=np.float32)
+    assert(np.all(np.unique(validity_map) == [0, 256]))
+    validity_map[validity_map <= 0] = 1
+
+    output = method.run(
+        input_image=gt_rgb1,
+        input_sparse_depth=gt_spdep1,
+        validity_map=validity_map,
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
